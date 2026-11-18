@@ -1,0 +1,10 @@
+{
+  "model": "CNN transfer learning",
+  "threshold": 0.89,
+  "img_size": 224,
+  "labels": [
+    "normal",
+    "pothole"
+  ],
+  "input_range": "[0,1] (bagi 255)"
+}

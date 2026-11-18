@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deteksi Pothole</title>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js"></script>
+<style>
+body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; }
+button { padding: .6rem 1.2rem; font-size: 1rem; cursor: pointer; }
+canvas { max-width: 100%; border-radius: 8px; }
+#hasil { margin-top: 1.5rem; }
+.pothole { color: #c0392b; }
+.normal { color: #27ae60; }
+.catatan { color: #666; font-size: .9rem; }
+</style>
+</head>
+<body>
+<h1>Deteksi Pothole dengan CNN</h1>
+<p>Model: MobileNetV3Large (input 224x224). Unggah foto jalan, lalu klik Prediksi.</p>
+<input type="file" id="file" accept="image/*">
+<button id="btn" disabled>Prediksi</button>
+<p id="status">Memuat model...</p>
+<div id="hasil"></div>
+<canvas id="canvas"></canvas>
+<script>
+const SIZE = 224;
+let THRESHOLD = 0.89;
+let session = null;
+let imgEl = null;
+
+const statusEl = document.getElementById("status");
+const btn = document.getElementById("btn");
+const hasil = document.getElementById("hasil");
+const canvas = document.getElementById("canvas");
+
+async function init() {
+  ort.env.wasm.numThreads = 1;
+  const cfg = await (await fetch("pothole_cnn_config.json")).json();
+  THRESHOLD = cfg.threshold;
+  session = await ort.InferenceSession.create("pothole.onnx");
+  statusEl.textContent = "Model siap.";
+  btn.disabled = false;
+}
+
+function jet(x) {
+  const r = Math.min(Math.max(1.5 - Math.abs(4 * x - 3), 0), 1);
+  const g = Math.min(Math.max(1.5 - Math.abs(4 * x - 2), 0), 1);
+  const b = Math.min(Math.max(1.5 - Math.abs(4 * x - 1), 0), 1);
+  return [r, g, b];
+}
+
+function preprocess(img) {
+  const c = document.createElement("canvas");
+  c.width = SIZE;
+  c.height = SIZE;
+  const ctx = c.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(img, 0, 0, SIZE, SIZE);
+  const px = ctx.getImageData(0, 0, SIZE, SIZE).data;
+  const data = new Float32Array(SIZE * SIZE * 3);
+  for (let i = 0; i < SIZE * SIZE; i++) {
+    data[i * 3] = px[i * 4] / 255;
+    data[i * 3 + 1] = px[i * 4 + 1] / 255;
+    data[i * 3 + 2] = px[i * 4 + 2] / 255;
+  }
+  return new ort.Tensor("float32", data, [1, SIZE, SIZE, 3]);
+}
+
+function gambarHeatmap(img, cam, h, w) {
+  const skala = Math.min(1, 640 / Math.max(img.width, img.height));
+  const W = Math.round(img.width * skala);
+  const H = Math.round(img.height * skala);
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(img, 0, 0, W, H);
+
+  let maks = 0;
+  for (const v of cam) if (v > maks) maks = v;
+
+  const kecil = document.createElement("canvas");
+  kecil.width = w;
+  kecil.height = h;
+  const kctx = kecil.getContext("2d");
+  const kimg = kctx.createImageData(w, h);
+  for (let i = 0; i < w * h; i++) {
+    const v = maks > 0 ? Math.round((cam[i] / maks) * 255) : 0;
+    kimg.data[i * 4] = v;
+    kimg.data[i * 4 + 1] = v;
+    kimg.data[i * 4 + 2] = v;
+    kimg.data[i * 4 + 3] = 255;
+  }
+  kctx.putImageData(kimg, 0, 0);
+
+  const besar = document.createElement("canvas");
+  besar.width = W;
+  besar.height = H;
+  const bctx = besar.getContext("2d");
+  bctx.imageSmoothingEnabled = true;
+  bctx.drawImage(kecil, 0, 0, W, H);
+  const camPx = bctx.getImageData(0, 0, W, H).data;
+
+  const asli = ctx.getImageData(0, 0, W, H);
+  const alpha = 0.45;
+  for (let i = 0; i < W * H; i++) {
+    const [r, g, b] = jet(camPx[i * 4] / 255);
+    asli.data[i * 4] = (1 - alpha) * asli.data[i * 4] + alpha * r * 255;
+    asli.data[i * 4 + 1] = (1 - alpha) * asli.data[i * 4 + 1] + alpha * g * 255;
+    asli.data[i * 4 + 2] = (1 - alpha) * asli.data[i * 4 + 2] + alpha * b * 255;
+  }
+  ctx.putImageData(asli, 0, 0);
+}
+
+document.getElementById("file").addEventListener("change", (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const img = new Image();
+  img.onload = () => {
+    imgEl = img;
+    canvas.width = img.width;
+    canvas.height = img.height;
+    canvas.getContext("2d").drawImage(img, 0, 0);
+    hasil.innerHTML = "";
+  };
+  img.src = URL.createObjectURL(f);
+});
+
+btn.addEventListener("click", async () => {
+  if (!imgEl) {
+    hasil.textContent = "Unggah foto jalan terlebih dahulu.";
+    return;
+  }
+  btn.disabled = true;
+  statusEl.textContent = "Memproses...";
+  const out = await session.run({ input: preprocess(imgEl) });
+  const prob = out.prob.data[0];
+  const pothole = prob >= THRESHOLD;
+  const kelas = pothole ? "pothole" : "normal";
+  const teks = pothole ? "POTHOLE" : "JALAN NORMAL";
+  hasil.innerHTML =
+    `<h2 class="${kelas}">Terdeteksi: ${teks}</h2>` +
+    `<p>Probabilitas pothole: <b>${(prob * 100).toFixed(1)}%</b><br>` +
+    `Threshold keputusan: <b>${THRESHOLD.toFixed(2)}</b></p>` +
+    `<p class="catatan">Model hanya mengklasifikasikan satu gambar secara utuh, bukan menunjukkan letak lubang. Heatmap di bawah hanya indikasi area yang paling memengaruhi keputusan model.</p>`;
+  const [, h, w] = out.cam.dims;
+  gambarHeatmap(imgEl, out.cam.data, h, w);
+  statusEl.textContent = "Selesai.";
+  btn.disabled = false;
+});
+
+init().catch((err) => {
+  statusEl.textContent = "Gagal memuat model: " + err.message;
+});
+</script>
+</body>
+</html>
